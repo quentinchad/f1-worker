@@ -331,6 +331,26 @@ def _safe_constructor_id(row) -> Optional[str]:
     return None
 
 
+def _safe_position(row) -> Optional[int]:
+    """Try multiple FastF1 columns for finishing position.
+    FastF1 uses different column names depending on the session year and data source.
+    Non-finishers (DNF, DSQ, etc.) return None intentionally.
+    """
+    NON_CLASSIFIED = {'nan', 'none', 'nat', '', 'nc', 'dsq', 'dnf', 'dns', 'dq', 'ret', 'wd', 'ex'}
+    for col in ('Position', 'ClassifiedPosition', 'GridPosition'):
+        val = row.get(col)
+        if val is None:
+            continue
+        s = str(val).strip().lower()
+        if s in NON_CLASSIFIED:
+            continue
+        try:
+            return int(float(s))
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
 def _extract_results(session, session_type: str) -> list:
     results = []
     try:
@@ -343,7 +363,7 @@ def _extract_results(session, session_type: str) -> list:
                 logger.warning(f"Skipping result row with no driver_id: {dict(row)}")
                 continue
             r = {
-                "position":       safe_val(row.get('Position')),
+                "position":       _safe_position(row),
                 "driver_id":      driver_id,
                 "driver_code":    str(row.get('Abbreviation', row.get('Driver', ''))),
                 "constructor_id": _safe_constructor_id(row),
