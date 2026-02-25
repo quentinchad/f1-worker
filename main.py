@@ -265,6 +265,30 @@ def load_session(req: SessionRequest):
     }
 
 
+def _safe_driver_id(row) -> Optional[str]:
+    """Extract a clean driver_id, never returning 'nan', 'none', 'nat' or empty."""
+    for col in ('DriverId', 'Abbreviation', 'Driver'):
+        val = row.get(col)
+        if val is None:
+            continue
+        s = str(val).strip().lower()
+        if s and s not in ('nan', 'none', 'nat', ''):
+            return s
+    return None
+
+
+def _safe_constructor_id(row) -> Optional[str]:
+    """Extract a clean constructor_id."""
+    for col in ('TeamId', 'TeamName'):
+        val = row.get(col)
+        if val is None:
+            continue
+        s = str(val).strip().lower().replace(' ', '_')
+        if s and s not in ('nan', 'none', 'nat', ''):
+            return s
+    return None
+
+
 def _extract_results(session, session_type: str) -> list:
     results = []
     try:
@@ -272,16 +296,20 @@ def _extract_results(session, session_type: str) -> list:
         if df is None or df.empty:
             return []
         for _, row in df.iterrows():
+            driver_id = _safe_driver_id(row)
+            if not driver_id:
+                logger.warning(f"Skipping result row with no driver_id: {dict(row)}")
+                continue
             r = {
-                "position": safe_val(row.get('Position')),
-                "driver_id": str(row.get('DriverId', row.get('Abbreviation', ''))).lower(),
-                "driver_code": str(row.get('Abbreviation', '')),
-                "constructor_id": str(row.get('TeamId', row.get('TeamName', ''))).lower().replace(' ', '_'),
+                "position":       safe_val(row.get('Position')),
+                "driver_id":      driver_id,
+                "driver_code":    str(row.get('Abbreviation', row.get('Driver', ''))),
+                "constructor_id": _safe_constructor_id(row),
                 "laps_completed": safe_val(row.get('NumberOfLaps')),
-                "status": str(row.get('Status', '')),
-                "points": safe_val(row.get('Points', 0)),
-                "fastest_lap": bool(row.get('FastestLap', False)),
-                "gap_to_leader": str(row.get('TimeDelta', '')) if row.get('TimeDelta') else None,
+                "status":         str(row.get('Status', '')),
+                "points":         safe_val(row.get('Points', 0)),
+                "fastest_lap":    bool(row.get('FastestLap', False)),
+                "gap_to_leader":  str(row.get('TimeDelta', '')) if row.get('TimeDelta') else None,
             }
             if session_type == 'Q':
                 r['q1_time'] = timedelta_to_str(row.get('Q1'))
@@ -300,19 +328,22 @@ def _extract_laps(session) -> list:
         if df is None or df.empty:
             return []
         for _, row in df.iterrows():
+            driver_id = _safe_driver_id(row)
+            if not driver_id:
+                continue
             lap = {
-                "driver_id": str(row.get('DriverId', row.get('Driver', ''))).lower(),
-                "driver_code": str(row.get('Driver', '')),
-                "lap_number": safe_val(row.get('LapNumber')),
-                "lap_time_ms": timedelta_to_ms(row.get('LapTime')),
-                "sector1_ms": timedelta_to_ms(row.get('Sector1Time')),
-                "sector2_ms": timedelta_to_ms(row.get('Sector2Time')),
-                "sector3_ms": timedelta_to_ms(row.get('Sector3Time')),
-                "compound": str(row.get('Compound', '')).upper() if row.get('Compound') else None,
-                "tyre_life": safe_val(row.get('TyreLife')),
-                "stint": safe_val(row.get('Stint')),
+                "driver_id":       driver_id,
+                "driver_code":     str(row.get('Driver', '')),
+                "lap_number":      safe_val(row.get('LapNumber')),
+                "lap_time_ms":     timedelta_to_ms(row.get('LapTime')),
+                "sector1_ms":      timedelta_to_ms(row.get('Sector1Time')),
+                "sector2_ms":      timedelta_to_ms(row.get('Sector2Time')),
+                "sector3_ms":      timedelta_to_ms(row.get('Sector3Time')),
+                "compound":        str(row.get('Compound', '')).upper() if row.get('Compound') else None,
+                "tyre_life":       safe_val(row.get('TyreLife')),
+                "stint":           safe_val(row.get('Stint')),
                 "is_personal_best": bool(row.get('IsPersonalBest', False)),
-                "speed_trap": safe_val(row.get('SpeedFL')),
+                "speed_trap":      safe_val(row.get('SpeedFL')),
             }
             laps.append(lap)
     except Exception as e:
