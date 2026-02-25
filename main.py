@@ -25,6 +25,46 @@ fastf1.Cache.enable_cache(CACHE_DIR)
 
 app = FastAPI(title="F1 Analytics Worker", version="1.0.0")
 
+
+# Ajoute ce dict en haut de main.py après les imports
+LOCATION_TO_CIRCUIT_KEY: dict = {
+    'bahrain':          'bahrain',
+    'jeddah':           'jeddah',
+    'melbourne':        'albert_park',
+    'suzuka':           'suzuka',
+    'shanghai':         'shanghai',
+    'miami':            'miami',
+    'imola':            'imola',
+    'monte-carlo':      'monaco',
+    'montreal':         'villeneuve',
+    'barcelona':        'catalunya',
+    'spielberg':        'red_bull_ring',
+    'silverstone':      'silverstone',
+    'budapest':         'hungaroring',   # ← ton cas
+    'spa-francorchamps':'spa',
+    'zandvoort':        'zandvoort',
+    'monza':            'monza',
+    'baku':             'baku',
+    'singapore':        'marina_bay',
+    'austin':           'americas',
+    'mexico city':      'rodriguez',
+    'são paulo':        'interlagos',
+    'las vegas':        'vegas',
+    'lusail':           'losail',
+    'abu dhabi':        'yas_marina',
+    'portimão':         'portimao',
+    'mugello':          'mugello',
+    'sochi':            'sochi',
+    'paul ricard':      'paul_ricard',
+    'istanbul':         'istanbul',
+    'nürburg':          'nurburgring',
+    'hockenheim':       'hockenheimring',
+    'magny-cours':      'magny_cours',
+    'sepang':           'sepang',
+    'valencia':         'valencia',
+    'indianapolis':     'indianapolis',
+}
+
 # ─── Pydantic Models ─────────────────────────────────────────────────────────
 
 class SeasonRequest(BaseModel):
@@ -122,7 +162,8 @@ def load_season(req: SeasonRequest):
 
     races = []
     for _, event in schedule.iterrows():
-        circuit_key = str(event.get('Location', '')).lower().replace(' ', '_').replace('-', '_')
+        raw_location = str(event.get('Location', '')).lower().strip()
+        circuit_key  = LOCATION_TO_CIRCUIT_KEY.get(raw_location, raw_location.replace(' ', '_').replace('-', '_'))
         race_entry = {
             "year": year,
             "round": int(event.get('RoundNumber', 0)),
@@ -230,7 +271,8 @@ def load_race(req: RaceRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"FastF1 event error: {str(e)}")
 
-    circuit_key = str(event.get('Location', '')).lower().replace(' ', '_').replace('-', '_')
+    raw_location = str(event.get('Location', '')).lower().strip()
+    circuit_key  = LOCATION_TO_CIRCUIT_KEY.get(raw_location, raw_location.replace(' ', '_').replace('-', '_'))
     sessions = _extract_event_sessions(event, req.year)
 
     race = {
