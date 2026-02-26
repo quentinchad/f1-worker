@@ -23,6 +23,17 @@ CACHE_DIR = os.path.join(os.path.dirname(__file__), 'fastf1_cache')
 os.makedirs(CACHE_DIR, exist_ok=True)
 fastf1.Cache.enable_cache(CACHE_DIR)
 
+# Désactiver ergast dans FastF1 — ergast.com est inaccessible sur Render
+# et cause des timeouts inutiles lors du chargement des sessions
+try:
+    fastf1.ergast.interface.Ergast._get = lambda *a, **kw: None
+except Exception:
+    pass
+
+# Configurer le niveau de log FastF1 pour réduire le bruit
+import logging as _logging
+_logging.getLogger('fastf1').setLevel(_logging.WARNING)
+
 app = FastAPI(title="F1 Analytics Worker", version="1.0.0")
 
 
@@ -287,6 +298,25 @@ def load_race(req: RaceRequest):
     return {"race": race, "sessions": sessions}
 
 
+@app.post("/debug_session")
+def debug_session(req: SessionRequest):
+    """Debug: retourne les colonnes et la première ligne de session.results."""
+    try:
+        session = fastf1.get_session(req.year, req.round, req.session_type)
+        session.load(laps=False, telemetry=False, weather=False, messages=False)
+        df = session.results
+        if df is None or df.empty:
+            return {"error": "results empty", "columns": []}
+        first_row = {k: str(v) for k, v in df.iloc[0].to_dict().items()}
+        return {
+            "columns": list(df.columns),
+            "first_row": first_row,
+            "dtypes": {k: str(v) for k, v in df.dtypes.items()},
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.post("/load_session")
 def load_session(req: SessionRequest):
     """Load full session data: results, laps, strategy."""
@@ -308,16 +338,25 @@ def load_session(req: SessionRequest):
 
 
 def _safe_driver_id(row) -> Optional[str]:
-    """Extract a clean driver_id. FastF1 2025 uses 'Abbreviation' reliably."""
-    # Priorité : Abbreviation (toujours présent) → DriverId → BroadcastName → Driver
+    """Extract a clean driver_id. Essaie plusieurs colonnes FastF1."""
+    # Abbreviation est toujours présent (VER, HAM...) → meilleur identifiant
     for col in ('Abbreviation', 'DriverId', 'BroadcastName', 'Driver'):
         val = row.get(col)
         if val is None:
             continue
         s = str(val).strip().lower()
-        # Nettoyer BroadcastName "VER" → ok, "Max Verstappen" → prendre initiales
         if s and s not in ('nan', 'none', 'nat', ''):
+            # BroadcastName peut être "Max Verstappen" → on ne veut pas ça
+            if col == 'BroadcastName' and ' ' in s:
+                continue
             return s
+    # Dernier recours : numéro de pilote
+    for col in ('DriverNumber', 'CarNumber'):
+        val = row.get(col)
+        if val is not None:
+            s = str(val).strip()
+            if s and s not in ('nan', 'none', ''):
+                return f"driver_{s}"
     return None
 
 
