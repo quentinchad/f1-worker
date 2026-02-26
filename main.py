@@ -325,7 +325,7 @@ def load_session(req: SessionRequest):
     laps_data = []
     strategy = []
 
-    # Étape 1 : résultats seuls (léger, ~50MB)
+    # Étape 1 : résultats via FastF1 (laps=False, léger)
     try:
         session = fastf1.get_session(req.year, req.round, req.session_type)
         session.load(laps=False, telemetry=False, weather=False, messages=False)
@@ -335,7 +335,17 @@ def load_session(req: SessionRequest):
     except Exception as e:
         logger.warning(f"Results load error: {e}")
 
-    # Étape 2 : laps + strategy (lourd ~300MB, seulement Race/Sprint)
+    # Si FastF1 n'a pas les résultats (Position=nan, Ergast inaccessible)
+    # → fallback Jolpica directement depuis le Worker
+    valid = [r for r in results if r.get('position') and r.get('driver_id')]
+    if len(valid) < 5:
+        logger.info(f"FastF1 results incomplete ({len(valid)} valid), trying Jolpica fallback")
+        jolpica_results = _fetch_jolpica_results(req.year, req.round, req.session_type)
+        if jolpica_results:
+            results = jolpica_results
+            logger.info(f"Jolpica fallback: {len(results)} results")
+
+    # Étape 2 : laps + strategy (lourd, seulement Race/Sprint)
     if req.session_type in ('Race', 'Sprint', 'R', 'S'):
         try:
             session2 = fastf1.get_session(req.year, req.round, req.session_type)
@@ -354,6 +364,69 @@ def load_session(req: SessionRequest):
         "laps":     laps_data[:3000],
         "strategy": strategy,
     }
+
+
+def _fetch_jolpica_results(year: int, round: int, session_type: str) -> list:
+    """Fallback Jolpica pour les résultats quand FastF1/Ergast est inaccessible."""
+    try:
+        # Map session type → endpoint Jolpica
+        endpoints = {
+            'Race': f'/{year}/{round}/results.json',
+            'R':    f'/{year}/{round}/results.json',
+            'Q':    f'/{year}/{round}/qualifying.json',
+            'Sprint Qualifying': f'/{year}/{round}/qualifying.json',
+            'SQ':   f'/{year}/{round}/qualifying.json',
+            'Sprint': f'/{year}/{round}/sprint.json',
+            'S':    f'/{year}/{round}/sprint.json',
+        }
+        endpoint = endpoints.get(session_type)
+        if not endpoint:
+            return []
+
+        url = f"https://api.jolpi.ca/ergast/f1{endpoint}?limit=30"
+        resp = requests.get(url, timeout=10)
+        if resp.status_code != 200:
+            return []
+        data = resp.json()
+        race = data['MRData']['RaceTable']['Races']
+        if not race:
+            return []
+        race = race[0]
+
+        # Choisir la bonne clé selon le type
+        key_map = {
+            'Race': 'Results', 'R': 'Results',
+            'Q': 'QualifyingResults', 'Sprint Qualifying': 'QualifyingResults', 'SQ': 'QualifyingResults',
+            'Sprint': 'SprintResults', 'S': 'SprintResults',
+        }
+        raw = race.get(key_map.get(session_type, 'Results'), [])
+
+        results = []
+        for r in raw:
+            d = r.get('Driver', {})
+            c = r.get('Constructor', {})
+            results.append({
+                'position':       int(r['position']) if r.get('position','').isdigit() else None,
+                'driver_id':      d.get('driverId', ''),
+                'driver_code':    d.get('code', ''),
+                'first_name':     d.get('givenName', ''),
+                'last_name':      d.get('familyName', ''),
+                'constructor_id': c.get('constructorId', ''),
+                'constructor_name': c.get('name', ''),
+                'laps_completed': int(r.get('laps', 0)),
+                'status':         r.get('status', ''),
+                'points':         float(r.get('points', 0)),
+                'fastest_lap':    r.get('FastestLap', {}).get('rank') == '1',
+                'gap_to_leader':  r.get('Time', {}).get('time') if r.get('Time') else r.get('status'),
+                'best_lap_time':  r.get('FastestLap', {}).get('Time', {}).get('time'),
+                'q1_time':        r.get('Q1'),
+                'q2_time':        r.get('Q2'),
+                'q3_time':        r.get('Q3'),
+            })
+        return results
+    except Exception as e:
+        logger.warning(f"Jolpica fallback error: {e}")
+        return []
 
 
 def _safe_driver_id(row) -> Optional[str]:
