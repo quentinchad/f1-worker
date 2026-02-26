@@ -308,20 +308,22 @@ def load_session(req: SessionRequest):
 
 
 def _safe_driver_id(row) -> Optional[str]:
-    """Extract a clean driver_id, never returning 'nan', 'none', 'nat' or empty."""
-    for col in ('DriverId', 'Abbreviation', 'Driver'):
+    """Extract a clean driver_id. FastF1 2025 uses 'Abbreviation' reliably."""
+    # Priorité : Abbreviation (toujours présent) → DriverId → BroadcastName → Driver
+    for col in ('Abbreviation', 'DriverId', 'BroadcastName', 'Driver'):
         val = row.get(col)
         if val is None:
             continue
         s = str(val).strip().lower()
+        # Nettoyer BroadcastName "VER" → ok, "Max Verstappen" → prendre initiales
         if s and s not in ('nan', 'none', 'nat', ''):
             return s
     return None
 
 
 def _safe_constructor_id(row) -> Optional[str]:
-    """Extract a clean constructor_id."""
-    for col in ('TeamId', 'TeamName'):
+    """Extract a clean constructor_id. FastF1 2025 uses 'TeamId' or 'TeamName'."""
+    for col in ('TeamId', 'ConstructorId', 'TeamName', 'Constructor'):
         val = row.get(col)
         if val is None:
             continue
@@ -332,12 +334,9 @@ def _safe_constructor_id(row) -> Optional[str]:
 
 
 def _safe_position(row) -> Optional[int]:
-    """Try multiple FastF1 columns for finishing position.
-    FastF1 uses different column names depending on the session year and data source.
-    Non-finishers (DNF, DSQ, etc.) return None intentionally.
-    """
+    """Try multiple FastF1 columns for finishing position."""
     NON_CLASSIFIED = {'nan', 'none', 'nat', '', 'nc', 'dsq', 'dnf', 'dns', 'dq', 'ret', 'wd', 'ex'}
-    for col in ('Position', 'ClassifiedPosition', 'GridPosition'):
+    for col in ('Position', 'ClassifiedPosition', 'GridPosition', 'FinishingPosition'):
         val = row.get(col)
         if val is None:
             continue
@@ -345,7 +344,9 @@ def _safe_position(row) -> Optional[int]:
         if s in NON_CLASSIFIED:
             continue
         try:
-            return int(float(s))
+            pos = int(float(s))
+            if pos > 0:
+                return pos
         except (ValueError, TypeError):
             continue
     return None
@@ -356,30 +357,44 @@ def _extract_results(session, session_type: str) -> list:
     try:
         df = session.results
         if df is None or df.empty:
+            logger.warning("session.results is None or empty")
             return []
+
+        # Log les colonnes disponibles pour debug
+        logger.info(f"session.results columns: {list(df.columns)}")
+        logger.info(f"session.results first row: {df.iloc[0].to_dict() if len(df) > 0 else 'empty'}")
+
         for _, row in df.iterrows():
             driver_id = _safe_driver_id(row)
             if not driver_id:
                 logger.warning(f"Skipping result row with no driver_id: {dict(row)}")
                 continue
+
+            # Position : essayer aussi de la déduire depuis l'index si tout échoue
+            position = _safe_position(row)
+
             r = {
-                "position":       _safe_position(row),
+                "position":       position,
                 "driver_id":      driver_id,
-                "driver_code":    str(row.get('Abbreviation', row.get('Driver', ''))),
+                "driver_code":    str(row.get('Abbreviation', row.get('Driver', ''))).upper(),
+                "first_name":     str(row.get('FirstName', '')),
+                "last_name":      str(row.get('LastName', row.get('FullName', ''))),
                 "constructor_id": _safe_constructor_id(row),
+                "constructor_name": str(row.get('TeamName', '')),
                 "laps_completed": safe_val(row.get('NumberOfLaps')),
                 "status":         str(row.get('Status', '')),
                 "points":         safe_val(row.get('Points', 0)),
                 "fastest_lap":    bool(row.get('FastestLap', False)),
-                "gap_to_leader":  str(row.get('TimeDelta', '')) if row.get('TimeDelta') else None,
+                "gap_to_leader":  str(row.get('Time', row.get('TimeDelta', ''))) if row.get('Time') or row.get('TimeDelta') else None,
+                "best_lap_time":  timedelta_to_str(row.get('FastestLapTime')),
             }
-            if session_type == 'Q':
+            if session_type in ('Q', 'SQ', 'SS', 'Sprint Qualifying', 'Sprint Shootout'):
                 r['q1_time'] = timedelta_to_str(row.get('Q1'))
                 r['q2_time'] = timedelta_to_str(row.get('Q2'))
                 r['q3_time'] = timedelta_to_str(row.get('Q3'))
             results.append(r)
     except Exception as e:
-        logger.warning(f"Results extraction error: {e}")
+        logger.warning(f"Results extraction error: {e}", exc_info=True)
     return results
 
 
