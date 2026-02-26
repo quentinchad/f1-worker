@@ -23,17 +23,6 @@ CACHE_DIR = os.path.join(os.path.dirname(__file__), 'fastf1_cache')
 os.makedirs(CACHE_DIR, exist_ok=True)
 fastf1.Cache.enable_cache(CACHE_DIR)
 
-# Désactiver ergast dans FastF1 — ergast.com est inaccessible sur Render
-# et cause des timeouts inutiles lors du chargement des sessions
-try:
-    fastf1.ergast.interface.Ergast._get = lambda *a, **kw: None
-except Exception:
-    pass
-
-# Configurer le niveau de log FastF1 pour réduire le bruit
-import logging as _logging
-_logging.getLogger('fastf1').setLevel(_logging.WARNING)
-
 app = FastAPI(title="F1 Analytics Worker", version="1.0.0")
 
 
@@ -298,25 +287,6 @@ def load_race(req: RaceRequest):
     return {"race": race, "sessions": sessions}
 
 
-@app.post("/debug_session")
-def debug_session(req: SessionRequest):
-    """Debug: retourne les colonnes et la première ligne de session.results."""
-    try:
-        session = fastf1.get_session(req.year, req.round, req.session_type)
-        session.load(laps=False, telemetry=False, weather=False, messages=False)
-        df = session.results
-        if df is None or df.empty:
-            return {"error": "results empty", "columns": []}
-        first_row = {k: str(v) for k, v in df.iloc[0].to_dict().items()}
-        return {
-            "columns": list(df.columns),
-            "first_row": first_row,
-            "dtypes": {k: str(v) for k, v in df.dtypes.items()},
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-
 @app.post("/load_session")
 def load_session(req: SessionRequest):
     """Load full session data: results, laps, strategy."""
@@ -338,31 +308,20 @@ def load_session(req: SessionRequest):
 
 
 def _safe_driver_id(row) -> Optional[str]:
-    """Extract a clean driver_id. Essaie plusieurs colonnes FastF1."""
-    # Abbreviation est toujours présent (VER, HAM...) → meilleur identifiant
-    for col in ('Abbreviation', 'DriverId', 'BroadcastName', 'Driver'):
+    """Extract a clean driver_id, never returning 'nan', 'none', 'nat' or empty."""
+    for col in ('DriverId', 'Abbreviation', 'Driver'):
         val = row.get(col)
         if val is None:
             continue
         s = str(val).strip().lower()
         if s and s not in ('nan', 'none', 'nat', ''):
-            # BroadcastName peut être "Max Verstappen" → on ne veut pas ça
-            if col == 'BroadcastName' and ' ' in s:
-                continue
             return s
-    # Dernier recours : numéro de pilote
-    for col in ('DriverNumber', 'CarNumber'):
-        val = row.get(col)
-        if val is not None:
-            s = str(val).strip()
-            if s and s not in ('nan', 'none', ''):
-                return f"driver_{s}"
     return None
 
 
 def _safe_constructor_id(row) -> Optional[str]:
-    """Extract a clean constructor_id. FastF1 2025 uses 'TeamId' or 'TeamName'."""
-    for col in ('TeamId', 'ConstructorId', 'TeamName', 'Constructor'):
+    """Extract a clean constructor_id."""
+    for col in ('TeamId', 'TeamName'):
         val = row.get(col)
         if val is None:
             continue
@@ -372,68 +331,35 @@ def _safe_constructor_id(row) -> Optional[str]:
     return None
 
 
-def _safe_position(row) -> Optional[int]:
-    """Try multiple FastF1 columns for finishing position."""
-    NON_CLASSIFIED = {'nan', 'none', 'nat', '', 'nc', 'dsq', 'dnf', 'dns', 'dq', 'ret', 'wd', 'ex'}
-    for col in ('Position', 'ClassifiedPosition', 'GridPosition', 'FinishingPosition'):
-        val = row.get(col)
-        if val is None:
-            continue
-        s = str(val).strip().lower()
-        if s in NON_CLASSIFIED:
-            continue
-        try:
-            pos = int(float(s))
-            if pos > 0:
-                return pos
-        except (ValueError, TypeError):
-            continue
-    return None
-
-
 def _extract_results(session, session_type: str) -> list:
     results = []
     try:
         df = session.results
         if df is None or df.empty:
-            logger.warning("session.results is None or empty")
             return []
-
-        # Log les colonnes disponibles pour debug
-        logger.info(f"session.results columns: {list(df.columns)}")
-        logger.info(f"session.results first row: {df.iloc[0].to_dict() if len(df) > 0 else 'empty'}")
-
         for _, row in df.iterrows():
             driver_id = _safe_driver_id(row)
             if not driver_id:
                 logger.warning(f"Skipping result row with no driver_id: {dict(row)}")
                 continue
-
-            # Position : essayer aussi de la déduire depuis l'index si tout échoue
-            position = _safe_position(row)
-
             r = {
-                "position":       position,
+                "position":       safe_val(row.get('Position')),
                 "driver_id":      driver_id,
-                "driver_code":    str(row.get('Abbreviation', row.get('Driver', ''))).upper(),
-                "first_name":     str(row.get('FirstName', '')),
-                "last_name":      str(row.get('LastName', row.get('FullName', ''))),
+                "driver_code":    str(row.get('Abbreviation', row.get('Driver', ''))),
                 "constructor_id": _safe_constructor_id(row),
-                "constructor_name": str(row.get('TeamName', '')),
                 "laps_completed": safe_val(row.get('NumberOfLaps')),
                 "status":         str(row.get('Status', '')),
                 "points":         safe_val(row.get('Points', 0)),
                 "fastest_lap":    bool(row.get('FastestLap', False)),
-                "gap_to_leader":  str(row.get('Time', row.get('TimeDelta', ''))) if row.get('Time') or row.get('TimeDelta') else None,
-                "best_lap_time":  timedelta_to_str(row.get('FastestLapTime')),
+                "gap_to_leader":  str(row.get('TimeDelta', '')) if row.get('TimeDelta') else None,
             }
-            if session_type in ('Q', 'SQ', 'SS', 'Sprint Qualifying', 'Sprint Shootout'):
+            if session_type == 'Q':
                 r['q1_time'] = timedelta_to_str(row.get('Q1'))
                 r['q2_time'] = timedelta_to_str(row.get('Q2'))
                 r['q3_time'] = timedelta_to_str(row.get('Q3'))
             results.append(r)
     except Exception as e:
-        logger.warning(f"Results extraction error: {e}", exc_info=True)
+        logger.warning(f"Results extraction error: {e}")
     return results
 
 
@@ -514,6 +440,66 @@ def _extract_strategy(laps: list) -> list:
                 "laps_on_tyre": last_lap - stint_start + 1,
             })
     return strategy
+
+
+@app.post("/debug_session")
+def debug_session(req: SessionRequest):
+    """Debug endpoint: returns raw FastF1 data without storing anything."""
+    try:
+        session = fastf1.get_session(req.year, req.round, req.session_type)
+        session.load(laps=True, telemetry=False, weather=False, messages=False)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"FastF1 session load error: {str(e)}")
+
+    # Infos sur session.results
+    results_info = {}
+    if session.results is not None and not session.results.empty:
+        df = session.results
+        results_info = {
+            "row_count": len(df),
+            "columns": list(df.columns),
+            "sample_rows": [],
+        }
+        for _, row in df.head(3).iterrows():
+            sample = {}
+            for col in df.columns:
+                val = row.get(col)
+                s = str(val)
+                sample[col] = s[:80]  # tronque les longues valeurs
+            results_info["sample_rows"].append(sample)
+    else:
+        results_info = {"error": "session.results is None or empty"}
+
+    # Infos sur session.laps
+    laps_info = {}
+    if session.laps is not None and not session.laps.empty:
+        df_laps = session.laps
+        laps_info = {
+            "row_count": len(df_laps),
+            "columns": list(df_laps.columns),
+            "drivers_found": list(df_laps['Driver'].unique()) if 'Driver' in df_laps.columns else [],
+            "sample_row": {},
+        }
+        for _, row in df_laps.head(1).iterrows():
+            for col in ['Driver', 'DriverId', 'LapNumber', 'Compound', 'Stint']:
+                laps_info["sample_row"][col] = str(row.get(col, 'N/A'))
+    else:
+        laps_info = {"error": "session.laps is None or empty"}
+
+    # Ce que _extract_results produit réellement
+    extracted = _extract_results(session, req.session_type)
+
+    return {
+        "session_info": {
+            "year": req.year,
+            "round": req.round,
+            "type": req.session_type,
+        },
+        "results_raw": results_info,
+        "laps_raw": laps_info,
+        "extracted_results_count": len(extracted),
+        "extracted_sample": extracted[:3],
+    }
 
 
 @app.post("/load_drivers")
